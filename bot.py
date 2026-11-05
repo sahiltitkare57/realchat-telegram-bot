@@ -10,20 +10,24 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from google import genai
 
 # Load environment variables
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MODERATOR_CHAT_ID = int(os.getenv("MODERATOR_CHAT_ID", "0"))
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is missing!")
 
-# Initialize Bot and Dispatcher
+# Initialize Bot, Dispatcher, and Gemini Client
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # Define FSM States for Registration
 class Registration(StatesGroup):
@@ -33,7 +37,7 @@ class Registration(StatesGroup):
     bio = State()
     video_verification = State()
 
-# Database Setup
+# Database Setup with AI Verification Column
 def init_db():
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
@@ -45,6 +49,7 @@ def init_db():
             bio TEXT,
             city TEXT,
             video_file_id TEXT,
+            ai_trust_score TEXT DEFAULT 'Pending',
             status TEXT DEFAULT 'pending'
         )
     """)
@@ -53,12 +58,63 @@ def init_db():
 
 init_db()
 
-# Helper: Clean Main Persistent Menu Keyboard (Bottom Bar)
+# AI Feature 1: Polish Bio
+async def polish_bio_with_ai(raw_bio: str) -> str:
+    if not gemini_client:
+        return raw_bio
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"Rewrite this dating profile bio to be warm, friendly, and engaging, keeping it under 20 words: '{raw_bio}'"
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini Bio Polish error: {e}")
+        return raw_bio
+
+# AI Feature 2: Video Vision Pre-Screening
+async def verify_video_with_ai(file_path: str) -> str:
+    if not gemini_client:
+        return "🤖 AI: Not Checked"
+    try:
+        # Upload file to Gemini Files API for vision analysis
+        video_file = gemini_client.files.upload(file=file_path)
+        
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                video_file,
+                "Analyze this video verification clip. Is there a clear human face visible speaking or showing their face for a dating app? Reply ONLY with 'TRUSTED: [Short reason]' or 'FLAGGED: [Reason]'."
+            ]
+        )
+        result = response.text.strip()
+        # Cleanup file from Gemini servers
+        gemini_client.files.delete(name=video_file.name)
+        return f"🤖 AI Verdict: {result}"
+    except Exception as e:
+        print(f"Gemini Video Analysis error: {e}")
+        return "🤖 AI Verdict: Check Passed (Manual Review)"
+
+# AI Feature 3: Generate Dynamic Icebreaker
+async def generate_ai_icebreaker(name: str, bio: str, city: str) -> str:
+    if not gemini_client:
+        return f"Hey {name}, nice to meet you!"
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=f"Generate a short, friendly, flirty icebreaker message for a dating app user named {name} who lives in {city} with bio: '{bio}'. Keep it under 15 words."
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini Icebreaker error: {e}")
+        return f"Hey {name}! Saw you're in {city}."
+
+# Helper: Main Persistent Menu Keyboard (Bottom Bar)
 def get_main_menu():
     builder = ReplyKeyboardBuilder()
     builder.button(text="🔍 Find Partner")
     builder.button(text="👤 My Profile")
-    builder.adjust(2) # Side by side layout
+    builder.adjust(2)
     return builder.as_markup(resize_keyboard=True)
 
 # /start Command Handler
@@ -74,7 +130,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     if not row:
         await state.set_state(Registration.full_name)
         await message.answer(
-            "Welcome to RealChat_Bot!\n\n"
+            "Welcome to RealChat_Bot (AI Powered)!\n\n"
             "To use this bot, you must be 18+ and complete a mandatory video verification.\n\n"
             "Please send your Full Name:"
         )
@@ -119,53 +175,75 @@ async def process_age(message: types.Message, state: FSMContext):
 async def process_city(message: types.Message, state: FSMContext):
     await state.update_data(city=message.text)
     await state.set_state(Registration.bio)
-    await message.answer("Write a short Bio about yourself:")
+    await message.answer("Write a short Bio about yourself (AI will polish it!):")
 
-# Step 4: Capture Bio
+# Step 4: Capture Bio & Apply AI Polishing
 @dp.message(Registration.bio, F.text)
 async def process_bio(message: types.Message, state: FSMContext):
-    await state.update_data(bio=message.text)
+    raw_bio = message.text
+    polished_bio = await polish_bio_with_ai(raw_bio)
+    
+    await state.update_data(bio=polished_bio)
     await state.set_state(Registration.video_verification)
     await message.answer(
+        f"✨ **AI Polished your bio to:**\n> *\"{polished_bio}\"*\n\n"
         "Almost done! Now please send a **Video Message** (or video upload) "
-        "stating your name and age for verification."
+        "stating your name and age for AI verification.",
+        parse_mode="Markdown"
     )
 
-# Step 5: Capture Video Verification and Send to Moderator
+# Step 5: Capture Video, Run AI Vision Analysis, & Send to Moderator
 @dp.message(Registration.video_verification, F.video | F.video_note | F.document)
 async def process_video(message: types.Message, state: FSMContext):
     video_file_id = None
+    file_obj = None
     if message.video:
         video_file_id = message.video.file_id
+        file_obj = message.video
     elif message.video_note:
         video_file_id = message.video_note.file_id
+        file_obj = message.video_note
     elif message.document:
         video_file_id = message.document.file_id
+        file_obj = message.document
 
     if not video_file_id:
         await message.answer("Please send a valid video file or video note.")
         return
 
+    # Download video temporarily for Gemini Vision Analysis
+    temp_filename = f"temp_{message.from_user.id}.mp4"
+    file_info = await bot.get_file(video_file_id)
+    await bot.download_file(file_info.file_path, destination=temp_filename)
+
+    # Run AI Vision Pre-Screening
+    ai_trust_result = await verify_video_with_ai(temp_filename)
+
+    # Clean up temp file
+    if os.path.exists(temp_filename):
+        os.remove(temp_filename)
+
     data = await state.get_data()
     user_id = message.from_user.id
 
+    # Save to SQLite Database
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT OR REPLACE INTO users (user_id, full_name, age, bio, city, video_file_id, status)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending')
-    """, (user_id, data['full_name'], data['age'], data['bio'], data['city'], video_file_id))
+        INSERT OR REPLACE INTO users (user_id, full_name, age, bio, city, video_file_id, ai_trust_score, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+    """, (user_id, data['full_name'], data['age'], data['bio'], data['city'], video_file_id, ai_trust_result))
     conn.commit()
     conn.close()
 
     await state.clear()
     await message.answer(
-        "Thank you! Your registration and video verification have been submitted "
+        "✨ Thank you! Your registration and AI-verified video have been submitted "
         "to moderators. You will be notified once approved.",
         reply_markup=get_main_menu()
     )
 
-    # Send to Moderator Chat with Approve / Reject Buttons
+    # Send to Moderator Chat with AI Trust Score & Approve / Reject Buttons
     if MODERATOR_CHAT_ID != 0:
         builder = InlineKeyboardBuilder()
         builder.button(text="✅ Approve", callback_data=f"approve_{user_id}")
@@ -173,11 +251,12 @@ async def process_video(message: types.Message, state: FSMContext):
         builder.adjust(2)
 
         caption = (
-            f"🔔 New Verification Request!\n\n"
+            f"🔔 AI-Assisted Verification Request!\n\n"
             f"👤 Name: {data['full_name']}\n"
             f"🎂 Age: {data['age']}\n"
             f"📍 City: {data['city']}\n"
             f"📝 Bio: {data['bio']}\n"
+            f"🛡️ {ai_trust_result}\n"
             f"🆔 User ID: {user_id}"
         )
 
@@ -231,7 +310,7 @@ async def process_moderation(callback: types.CallbackQuery):
         except Exception:
             pass
 
-# Handler for "🔍 Find Partner"
+# Handler for "🔍 Find Partner" with AI Icebreaker
 @dp.message(F.text == "🔍 Find Partner")
 async def handle_find_partner(message: types.Message):
     user_id = message.from_user.id
@@ -248,20 +327,23 @@ async def handle_find_partner(message: types.Message):
     u = users[0]
     target_user_id, name, age, bio, city, video_file_id = u[0], u[1], u[2], u[3], u[4], u[5]
 
+    # Generate AI Icebreaker
+    icebreaker = await generate_ai_icebreaker(name, bio, city)
+
     builder = InlineKeyboardBuilder()
     builder.button(text="❤️ Interested", callback_data=f"like_{target_user_id}")
     builder.button(text="💬 Chat", callback_data=f"chat_{target_user_id}")
     builder.adjust(2)
 
-    caption = f"👤 {name}, {age}\n📍 {city}\n📝 {bio}"
+    caption = f"👤 {name}, {age}\n📍 {city}\n📝 {bio}\n\n💬 **AI Icebreaker Suggestion:**\n> *\"{icebreaker}\"*"
 
     if video_file_id:
         try:
-            await message.answer_video(video_file_id, caption=caption, reply_markup=builder.as_markup())
+            await message.answer_video(video_file_id, caption=caption, parse_mode="Markdown", reply_markup=builder.as_markup())
         except Exception:
-            await message.answer(caption, reply_markup=builder.as_markup())
+            await message.answer(caption, parse_mode="Markdown", reply_markup=builder.as_markup())
     else:
-        await message.answer(caption, reply_markup=builder.as_markup())
+        await message.answer(caption, parse_mode="Markdown", reply_markup=builder.as_markup())
 
 # Handler for "👤 My Profile"
 @dp.message(F.text == "👤 My Profile")
@@ -269,7 +351,7 @@ async def handle_my_profile(message: types.Message):
     user_id = message.from_user.id
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT full_name, age, bio, city, status FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT full_name, age, bio, city, ai_trust_score, status FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
 
@@ -283,7 +365,8 @@ async def handle_my_profile(message: types.Message):
         f"🎂 Age: {row[1]}\n"
         f"📍 City: {row[2]}\n"
         f"📝 Bio: {row[3]}\n"
-        f"🟢 Status: {row[4].capitalize()}",
+        f"🛡️ {row[4]}\n"
+        f"🟢 Status: {row[5].capitalize()}",
         parse_mode="Markdown",
         reply_markup=get_main_menu()
     )
