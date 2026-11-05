@@ -146,6 +146,22 @@ async def cmd_start(message: types.Message, state: FSMContext):
         else:
             await message.answer("Your profile verification was rejected.")
 
+# /update Command Handler to reset and re-register profile
+@dp.message(Command("update"))
+async def cmd_update(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+    await state.set_state(Registration.full_name)
+    await message.answer(
+        "🔄 Let's update your profile!\n\n"
+        "Please send your correct Full Name:"
+    )
+
 # Step 1: Capture Full Name
 @dp.message(Registration.full_name, F.text)
 async def process_full_name(message: types.Message, state: FSMContext):
