@@ -8,6 +8,7 @@ from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # Load environment variables
@@ -119,10 +120,9 @@ async def process_bio(message: types.Message, state: FSMContext):
         "stating your name and age for verification."
     )
 
-# Step 5: Capture Video Verification and Save to DB
+# Step 5: Capture Video Verification and Send to Moderator
 @dp.message(Registration.video_verification, F.video | F.video_note | F.document)
 async def process_video(message: types.Message, state: FSMContext):
-    # Get video file ID from either video message, video note, or document
     video_file_id = None
     if message.video:
         video_file_id = message.video.file_id
@@ -138,7 +138,7 @@ async def process_video(message: types.Message, state: FSMContext):
     data = await state.get_data()
     user_id = message.from_user.id
 
-    # Save to SQLite Database
+    # Save to SQLite Database as 'pending'
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute("""
@@ -154,24 +154,67 @@ async def process_video(message: types.Message, state: FSMContext):
         "to moderators. You will be notified once approved."
     )
 
-    # Optional: Notify moderator if MODERATOR_CHAT_ID is configured
+    # Send to Moderator Chat with Approve / Reject Buttons
     if MODERATOR_CHAT_ID != 0:
+        builder = InlineKeyboardBuilder()
+        builder.button(text="✅ Approve", callback_data=f"approve_{user_id}")
+        builder.button(text="❌ Reject", callback_data=f"reject_{user_id}")
+        builder.adjust(2)
+
+        caption = (
+            f"🔔 New Verification Request!\n\n"
+            f"👤 Name: {data['full_name']}\n"
+            f"🎂 Age: {data['age']}\n"
+            f"📍 City: {data['city']}\n"
+            f"📝 Bio: {data['bio']}\n"
+            f"🆔 User ID: {user_id}"
+        )
+
         try:
-            await bot.send_message(
-                MODERATOR_CHAT_ID,
-                f"🔔 New Verification Request!\n\n"
-                f"Name: {data['full_name']}\n"
-                f"Age: {data['age']}\n"
-                f"City: {data['city']}\n"
-                f"Bio: {data['bio']}\n"
-                f"User ID: {user_id}"
-            )
             if message.video:
-                await bot.send_video(MODERATOR_CHAT_ID, video_file_id)
+                await bot.send_video(MODERATOR_CHAT_ID, video_file_id, caption=caption, reply_markup=builder.as_markup())
             elif message.video_note:
                 await bot.send_video_note(MODERATOR_CHAT_ID, video_file_id)
+                await bot.send_message(MODERATOR_CHAT_ID, caption, reply_markup=builder.as_markup())
+            elif message.document:
+                await bot.send_document(MODERATOR_CHAT_ID, video_file_id, caption=caption, reply_markup=builder.as_markup())
         except Exception as e:
             print(f"Failed to notify moderator: {e}")
+
+# Admin Callback Handler (Approve / Reject)
+@dp.callback_query(F.data.startswith("approve_") | F.data.startswith("reject_"))
+async def process_moderation(callback: types.CallbackQuery):
+    action, user_id_str = callback.data.split("_")
+    target_user_id = int(user_id_str)
+
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+
+    if action == "approve":
+        cursor.execute("UPDATE users SET status = 'approved' WHERE user_id = ?", (target_user_id,))
+        conn.commit()
+        conn.close()
+
+        await callback.message.edit_caption(caption=callback.message.caption + "\n\n✅ **STATUS: APPROVED**", parse_mode="Markdown")
+        await callback.answer("Profile approved successfully!")
+
+        try:
+            await bot.send_message(target_user_id, "🎉 Your profile has been approved by the moderator! You can now use /browse to check out profiles.")
+        except Exception:
+            pass
+
+    elif action == "reject":
+        cursor.execute("UPDATE users SET status = 'rejected' WHERE user_id = ?", (target_user_id,))
+        conn.commit()
+        conn.close()
+
+        await callback.message.edit_caption(caption=callback.message.caption + "\n\n❌ **STATUS: REJECTED**", parse_mode="Markdown")
+        await callback.answer("Profile rejected.")
+
+        try:
+            await bot.send_message(target_user_id, "❌ Unfortunately, your profile verification was rejected by moderators.")
+        except Exception:
+            pass
 
 # /browse Command Handler
 @dp.message(Command("browse"))
