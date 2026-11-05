@@ -8,7 +8,7 @@ from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 # Load environment variables
@@ -53,6 +53,14 @@ def init_db():
 
 init_db()
 
+# Helper: Clean Main Persistent Menu Keyboard (Bottom Bar)
+def get_main_menu():
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="🔍 Find Partner")
+    builder.button(text="👤 My Profile")
+    builder.adjust(2) # Side by side layout
+    return builder.as_markup(resize_keyboard=True)
+
 # /start Command Handler
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -73,7 +81,10 @@ async def cmd_start(message: types.Message, state: FSMContext):
     else:
         status = row[0]
         if status == 'approved':
-            await message.answer("Your profile is already verified! Use /browse to check out profiles.")
+            await message.answer(
+                "Your profile is already verified! Use the menu below to find partners.",
+                reply_markup=get_main_menu()
+            )
         elif status == 'pending':
             await message.answer("Your video verification and profile are currently pending moderator approval.")
         else:
@@ -138,7 +149,6 @@ async def process_video(message: types.Message, state: FSMContext):
     data = await state.get_data()
     user_id = message.from_user.id
 
-    # Save to SQLite Database as 'pending'
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
     cursor.execute("""
@@ -151,7 +161,8 @@ async def process_video(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
         "Thank you! Your registration and video verification have been submitted "
-        "to moderators. You will be notified once approved."
+        "to moderators. You will be notified once approved.",
+        reply_markup=get_main_menu()
     )
 
     # Send to Moderator Chat with Approve / Reject Buttons
@@ -199,7 +210,11 @@ async def process_moderation(callback: types.CallbackQuery):
         await callback.answer("Profile approved successfully!")
 
         try:
-            await bot.send_message(target_user_id, "🎉 Your profile has been approved by the moderator! You can now use /browse to check out profiles.")
+            await bot.send_message(
+                target_user_id, 
+                "🎉 Your profile has been approved by the moderator! You can now tap '🔍 Find Partner' below to check out profiles.",
+                reply_markup=get_main_menu()
+            )
         except Exception:
             pass
 
@@ -216,22 +231,74 @@ async def process_moderation(callback: types.CallbackQuery):
         except Exception:
             pass
 
-# /browse Command Handler
-@dp.message(Command("browse"))
-async def cmd_browse(message: types.Message):
+# Handler for "🔍 Find Partner"
+@dp.message(F.text == "🔍 Find Partner")
+async def handle_find_partner(message: types.Message):
+    user_id = message.from_user.id
     conn = sqlite3.connect("bot_database.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT full_name, age, bio, city FROM users WHERE status = 'approved'")
+    cursor.execute("SELECT user_id, full_name, age, bio, city, video_file_id FROM users WHERE status = 'approved' AND user_id != ?", (user_id,))
     users = cursor.fetchall()
     conn.close()
 
     if not users:
-        await message.answer("No approved profiles available right now. Check back later!")
+        await message.answer("No more profiles available right now. Check back later!", reply_markup=get_main_menu())
         return
 
-    for u in users:
-        text = f"Name: {u[0]}, Age: {u[1]}\nCity: {u[3]}\nBio: {u[2]}"
-        await message.answer(text)
+    u = users[0]
+    target_user_id, name, age, bio, city, video_file_id = u[0], u[1], u[2], u[3], u[4], u[5]
+
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❤️ Interested", callback_data=f"like_{target_user_id}")
+    builder.button(text="💬 Chat", callback_data=f"chat_{target_user_id}")
+    builder.adjust(2)
+
+    caption = f"👤 {name}, {age}\n📍 {city}\n📝 {bio}"
+
+    if video_file_id:
+        try:
+            await message.answer_video(video_file_id, caption=caption, reply_markup=builder.as_markup())
+        except Exception:
+            await message.answer(caption, reply_markup=builder.as_markup())
+    else:
+        await message.answer(caption, reply_markup=builder.as_markup())
+
+# Handler for "👤 My Profile"
+@dp.message(F.text == "👤 My Profile")
+async def handle_my_profile(message: types.Message):
+    user_id = message.from_user.id
+    conn = sqlite3.connect("bot_database.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT full_name, age, bio, city, status FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        await message.answer("You haven't registered yet! Send /start to begin.")
+        return
+
+    await message.answer(
+        f"📊 **Your Profile Details:**\n\n"
+        f"👤 Name: {row[0]}\n"
+        f"🎂 Age: {row[1]}\n"
+        f"📍 City: {row[2]}\n"
+        f"📝 Bio: {row[3]}\n"
+        f"🟢 Status: {row[4].capitalize()}",
+        parse_mode="Markdown",
+        reply_markup=get_main_menu()
+    )
+
+# Interactive Like / Chat Callback Handler
+@dp.callback_query(F.data.startswith("like_") | F.data.startswith("chat_"))
+async def process_interaction(callback: types.CallbackQuery):
+    action, target_id = callback.data.split("_")
+    if action == "like":
+        await callback.answer("You marked this profile as interested! ❤️")
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer("❤️ You marked this profile as interested. Use '🔍 Find Partner' to browse more.")
+    elif action == "chat":
+        await callback.answer("Opening chat connection...")
+        await callback.message.answer(f"💬 You can now message user ID {target_id} or connect directly!")
 
 # Webhook configuration
 PORT = int(os.environ.get("PORT", 8080))
