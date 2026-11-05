@@ -54,18 +54,18 @@ async def cmd_start(message: types.Message):
 
     if not row:
         await message.answer(
-            "Namaskar! RealChat_Bot madhye tumche swagat ahe.\n\n"
-            "Ya bot madhye yenyasathi tumhi 18+ asne garajeche ahe ani mandatory video verification karave lagel.\n\n"
-            "Tumche naav (Full Name) pathva:"
+            "Welcome to RealChat_Bot!\n\n"
+            "To use this bot, you must be 18+ and complete a mandatory video verification.\n\n"
+            "Please send your Full Name:"
         )
     else:
         status = row[0]
         if status == 'approved':
-            await message.answer("Tumche profile already verified ahe! Profiles browse karnyasathi /browse vapra.")
+            await message.answer("Your profile is already verified! Use /browse to check out profiles.")
         elif status == 'pending':
-            await message.answer("Tumchi video verification ani profile sadhya moderation sathi pending ahe.")
+            await message.answer("Your video verification and profile are currently pending moderator approval.")
         else:
-            await message.answer("Tumche profile reject zale ahe.")
+            await message.answer("Your profile verification was rejected.")
 
 # /browse Command Handler
 @dp.message(Command("browse"))
@@ -77,11 +77,11 @@ async def cmd_browse(message: types.Message):
     conn.close()
 
     if not users:
-        await message.answer("Sadhya kontehi approved profiles uplabdh nahiyet. Kahi welane parat try kara!")
+        await message.answer("No approved profiles available right now. Check back later!")
         return
 
     for u in users:
-        text = f"Naav: {u[0]}, Vay: {u[1]}\nCity: {u[3]}\nBio: {u[2]}"
+        text = f"Name: {u[0]}, Age: {u[1]}\nCity: {u[3]}\nBio: {u[2]}"
         await message.answer(text)
 
 # Webhook configuration
