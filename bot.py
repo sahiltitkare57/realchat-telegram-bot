@@ -58,14 +58,14 @@ def init_db():
 
 init_db()
 
-# AI Feature 1: Polish Bio
+# AI Feature 1: Enhanced Bio Polishing (Stricter instruction to ensure active rewriting)
 async def polish_bio_with_ai(raw_bio: str) -> str:
     if not gemini_client:
         return raw_bio
     try:
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=f"Rewrite this dating profile bio to be warm, friendly, and engaging, keeping it under 20 words: '{raw_bio}'"
+            contents=f"Rewrite and transform the following raw dating profile bio into a creative, warm, and engaging sentence. Fix any spelling errors (e.g. 'hearthed' to 'hearted'). Never return the exact same text verbatim. Keep it under 20 words: '{raw_bio}'"
         )
         return response.text.strip()
     except Exception as e:
@@ -359,7 +359,7 @@ async def handle_find_partner(message: types.Message):
         except Exception:
             await message.answer(caption, parse_mode="Markdown", reply_markup=builder.as_markup())
     else:
-        await message.answer(caption, parse_mode="Markdown", reply_markup=builder.as_markup())
+        await message.answer(caption, parse_Mode="Markdown", reply_markup=builder.as_markup())
 
 # Handler for "👤 My Profile"
 @dp.message(F.text == "👤 My Profile")
